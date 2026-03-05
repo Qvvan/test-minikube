@@ -1,0 +1,54 @@
+name: Preview Environment
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set branch name
+      run: |
+        BRANCH=$(echo "${{ github.ref_name }}" | sed 's/\//-/g' | tr '[:upper:]' '[:lower:]')
+        echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Configure kubeconfig
+      run: |
+        mkdir -p ~/.kube
+        echo "${{ secrets.KUBECONFIG_DATA }}" > ~/.kube/config
+
+    - name: Create namespace
+      run: |
+        kubectl create namespace preview-${{ env.BRANCH }} --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Deploy to K8s
+      run: |
+        kubectl create deployment fastapi \
+          --image=nginxdemos/hello \
+          --namespace=preview-${{ env.BRANCH }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+        
+        kubectl expose deployment fastapi \
+          --port=80 \
+          --type=NodePort \
+          --namespace=preview-${{ env.BRANCH }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Get access info
+      run: |
+        sleep 5
+        NODE_PORT=$(kubectl get svc fastapi \
+          --namespace=preview-${{ env.BRANCH }} \
+          -o jsonpath='{.spec.ports[0].nodePort}')
+        echo "✅ Preview готов!"
+        echo "🌍 URL: http://46.38.156.11:$NODE_PORT"
+        echo "🌿 Branch: ${{ env.BRANCH }}"
