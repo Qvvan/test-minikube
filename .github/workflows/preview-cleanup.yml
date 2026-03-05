@@ -1,0 +1,121 @@
+name: Preview Environment Cleanup
+
+on:
+  # при закрытии PR (merge или close)
+  pull_request:
+    types: [closed]
+
+  # при удалении ветки
+  delete:
+
+  # ручной запуск для очистки конкретного namespace
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name to cleanup (without preview- prefix)"
+        required: true
+
+  # раз в сутки чистим зависшие preview старше 7 дней
+  schedule:
+    - cron: "0 3 * * *"
+
+env:
+  APP_NAME: fastapi
+  REGISTRY: ghcr.io
+
+jobs:
+  cleanup-single:
+    if: github.event_name == 'pull_request' || github.event_name == 'delete' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set branch name
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ github.event.inputs.branch }}"
+          elif [ "${{ github.event_name }}" = "delete" ]; then
+            BRANCH=$(echo "${{ github.event.ref }}" | sed 's/\//-/g' | tr '[:upper:]' '[:lower:]')
+          else
+            BRANCH=$(echo "${{ github.head_ref }}" | sed 's/\//-/g' | tr '[:upper:]' '[:lower:]')
+          fi
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+          echo "NAMESPACE=preview-$BRANCH" >> $GITHUB_ENV
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DATA }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Delete namespace
+        run: |
+          if kubectl get namespace ${{ env.NAMESPACE }} &>/dev/null; then
+            kubectl delete namespace ${{ env.NAMESPACE }}
+            echo "✅ Namespace ${{ env.NAMESPACE }} deleted"
+          else
+            echo "ℹ️ Namespace ${{ env.NAMESPACE }} not found, skipping"
+          fi
+
+      - name: Delete container image
+        continue-on-error: true
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_NAME="${{ env.APP_NAME }}-preview"
+
+          # удаляем через GitHub API
+          VERSION_ID=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GHCR_TOKEN }}" \
+            -H "Accept: application/vnd.github.v2+json" \
+            "https://api.github.com/user/packages/container/$IMAGE_NAME/versions" \
+            | jq -r ".[] | select(.metadata.container.tags[] == \"${{ env.BRANCH }}\") | .id")
+
+          if [ -n "$VERSION_ID" ]; then
+            curl -s -X DELETE \
+              -H "Authorization: Bearer ${{ secrets.GHCR_TOKEN }}" \
+              "https://api.github.com/user/packages/container/$IMAGE_NAME/versions/$VERSION_ID"
+            echo "✅ Image tag ${{ env.BRANCH }} deleted"
+          fi
+
+      - name: Summary
+        run: |
+          echo "## 🧹 Preview cleaned up" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌿 Branch | \`${{ env.BRANCH }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🏷 Namespace | \`${{ env.NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # очистка старых preview по расписанию
+  cleanup-stale:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DATA }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Delete stale preview namespaces
+        run: |
+          echo "## 🧹 Stale preview cleanup" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          STALE_NS=$(kubectl get namespaces -l preview=true \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' \
+            | while read NS CREATED; do
+                # если namespace старше 7 дней
+                CREATED_EPOCH=$(date -d "$CREATED" +%s)
+                NOW_EPOCH=$(date +%s)
+                AGE_DAYS=$(( (NOW_EPOCH - CREATED_EPOCH) / 86400 ))
+                if [ "$AGE_DAYS" -gt 7 ]; then
+                  echo "$NS"
+                fi
+              done)
+
+          if [ -z "$STALE_NS" ]; then
+            echo "ℹ️ No stale preview namespaces found" | tee -a $GITHUB_STEP_SUMMARY
+          else
+            for NS in $STALE_NS; do
+              kubectl delete namespace "$NS"
+              echo "✅ Deleted stale namespace: $NS (older than 7 days)" | tee -a $GITHUB_STEP_SUMMARY
+            done
+          fi
