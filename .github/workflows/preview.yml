@@ -18,6 +18,17 @@ jobs:
         BRANCH=$(echo "${{ github.ref_name }}" | sed 's/\//-/g' | tr '[:upper:]' '[:lower:]')
         echo "BRANCH=$BRANCH" >> $GITHUB_ENV
 
+    - name: Login to GitHub Container Registry
+      run: |
+        echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+    - name: Build and push image
+      run: |
+        IMAGE=ghcr.io/${{ github.repository_owner }}/fastapi-preview:${{ env.BRANCH }}
+        echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+        docker build -t $IMAGE .
+        docker push $IMAGE
+
     - name: Setup kubectl
       uses: azure/setup-kubectl@v3
 
@@ -33,12 +44,12 @@ jobs:
     - name: Deploy to K8s
       run: |
         kubectl create deployment fastapi \
-          --image=nginxdemos/hello \
+          --image=${{ env.IMAGE }} \
           --namespace=preview-${{ env.BRANCH }} \
           --dry-run=client -o yaml | kubectl apply -f -
-        
+
         kubectl expose deployment fastapi \
-          --port=80 \
+          --port=8000 \
           --type=NodePort \
           --namespace=preview-${{ env.BRANCH }} \
           --dry-run=client -o yaml | kubectl apply -f -
