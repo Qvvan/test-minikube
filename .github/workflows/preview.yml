@@ -42,17 +42,46 @@ jobs:
         kubectl create namespace preview-${{ env.BRANCH }} --dry-run=client -o yaml | kubectl apply -f -
 
     - name: Deploy to K8s
-      run: |
-        kubectl create deployment fastapi \
-          --image=${{ env.IMAGE }} \
-          --namespace=preview-${{ env.BRANCH }} \
-          --dry-run=client -o yaml | kubectl apply -f -
+          run: |
+            # Создаём секрет для доступа к ghcr.io
+            kubectl create secret docker-registry ghcr-secret \
+              --docker-server=ghcr.io \
+              --docker-username=${{ github.repository_owner }} \
+              --docker-password=${{ secrets.GHCR_TOKEN }} \
+              --namespace=preview-${{ env.BRANCH }} \
+              --dry-run=client -o yaml | kubectl apply -f -
 
-        kubectl expose deployment fastapi \
-          --port=8000 \
-          --type=NodePort \
-          --namespace=preview-${{ env.BRANCH }} \
-          --dry-run=client -o yaml | kubectl apply -f -
+            # Деплоим приложение
+            cat <<EOF | kubectl apply -f -
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: fastapi
+              namespace: preview-${{ env.BRANCH }}
+            spec:
+              replicas: 1
+              selector:
+                matchLabels:
+                  app: fastapi
+              template:
+                metadata:
+                  labels:
+                    app: fastapi
+                spec:
+                  imagePullSecrets:
+                  - name: ghcr-secret
+                  containers:
+                  - name: fastapi
+                    image: ${{ env.IMAGE }}
+                    ports:
+                    - containerPort: 8000
+            EOF
+
+            kubectl expose deployment fastapi \
+              --port=8000 \
+              --type=NodePort \
+              --namespace=preview-${{ env.BRANCH }} \
+              --dry-run=client -o yaml | kubectl apply -f -
 
     - name: Get access info
       run: |
