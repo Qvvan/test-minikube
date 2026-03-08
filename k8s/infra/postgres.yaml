@@ -30,10 +30,10 @@ spec:
         app: postgres
     spec:
       nodeSelector:
-        role: egor-server
+        role: server-egor
       containers:
         - name: postgres
-          image: postgres:15
+          image: postgres:16.2
           ports:
             - containerPort: 5432
           env:
