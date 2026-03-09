@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-service
+  namespace: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: python-service
+  template:
+    metadata:
+      labels:
+        app: python-service
+    spec:
+      nodeSelector:
+        role: server-backend-1     # ← на втором worker
+      containers:
+        - name: python-service
+          image: ghcr.io/qvvan/test-minikube:${{ github.ref_name }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DB_HOST
+              value: "postgres-service.infra"   # адрес postgres
+            - name: DB_NAME
+              value: "maindb"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  namespace: infra
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  namespace: infra
+                  key: POSTGRES_PASSWORD
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-service
+  namespace: dev
+spec:
+  selector:
+    app: python-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
