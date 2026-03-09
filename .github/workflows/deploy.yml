@@ -26,7 +26,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/qvvan/test-minikube:${{ github.ref_name }}
+          tags: ghcr.io/qvvan/test-minikube:${{ github.sha }}
 
       # Новый шаг — деплой в Kubernetes
       - name: Deploy to Kubernetes
@@ -37,5 +37,5 @@ jobs:
           curl -LO "https://dl.k8s.io/release/$(cat stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
-          sed -i "s|IMAGE_TAG|${{ github.ref_name }}|g" k8s/service.yaml
+          sed -i "s|IMAGE_TAG|${{ github.sha }}|g" k8s/service.yaml
           kubectl apply -f k8s/service.yaml
