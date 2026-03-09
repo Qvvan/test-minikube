@@ -14,7 +14,7 @@ def get_db():
 
 @app.get("/")
 def read_root():
-    return {"status": "ok"}
+    return {"status": "ok!"}
 
 @app.get("/db-test")
 def db_test():
