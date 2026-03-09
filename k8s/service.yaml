@@ -17,7 +17,7 @@ spec:
         role: server-backend-1     # ← на втором worker
       containers:
         - name: python-service
-          image: ghcr.io/qvvan/test-minikube:${{ github.ref_name }}
+          image: ghcr.io/qvvan/test-minikube:IMAGE_TAG
           ports:
             - containerPort: 8000
           env:
