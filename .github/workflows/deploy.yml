@@ -119,3 +119,29 @@ jobs:
                 targetPort: 8000
             type: ClusterIP
           EOF
+
+      - name: Deploy Summary
+        run: |
+            BRANCH_NAME=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9]/_/g' | tr '[:upper:]' '[:lower:]')
+            
+            # Ждём пока под запустится
+            kubectl rollout status deployment/python-service-${BRANCH_NAME} -n dev --timeout=120s
+            
+            # Получаем NodePort
+            NODE_PORT=$(kubectl get service python-service-${BRANCH_NAME} -n dev \
+              -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "ClusterIP (нет внешнего порта)")
+            
+            # IP воркер ноды
+            NODE_IP=$(kubectl get nodes -l role=server-backend-1 \
+              -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+            
+            # Пишем Summary
+            echo "## 🚀 Deploy успешен!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Параметр | Значение |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|----------|" >> $GITHUB_STEP_SUMMARY
+            echo "| 🌿 Ветка | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 📦 Образ | \`ghcr.io/qvvan/test-minikube:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🗄️ База данных | \`db_${BRANCH_NAME}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🌐 URL | \`http://${NODE_IP}:${NODE_PORT}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| 📝 Namespace | \`dev\` |" >> $GITHUB_STEP_SUMMARY
