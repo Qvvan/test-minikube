@@ -8,6 +8,7 @@ on:
 env:
   REGISTRY: ghcr.io
   APP_NAME: python-service
+  NODE_IP: 46.38.156.11 
 
 jobs:
   deploy:
