@@ -204,11 +204,7 @@ jobs:
           NODE_PORT=$(kubectl get svc ${{ env.APP_NAME }} \
             -n ${{ env.NAMESPACE }} \
             -o jsonpath='{.spec.ports[0].nodePort}')
-
-          NODE_IP=$(kubectl get nodes -l role=server-backend-1 \
-            -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
-
-          PREVIEW_URL="http://${NODE_IP}:${NODE_PORT}"
+          PREVIEW_URL="http://${{ env.NODE_IP }}:$NODE_PORT"
           echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
 
           echo "## ✅ Preview deployed!" >> $GITHUB_STEP_SUMMARY
