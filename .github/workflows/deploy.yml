@@ -1,67 +1,120 @@
-name: Build and Deploy
+name: Preview Environment Deploy
 
 on:
   push:
-    branches:
+    branches-ignore:
       - main
-      - 'feature/*'
+
+env:
+  REGISTRY: ghcr.io
+  APP_NAME: python-service
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      pull-requests: write
+      contents: read
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Login to ghcr.io
-        uses: docker/login-action@v2
+      - name: Set environment variables
+        run: |
+          BRANCH=$(echo "${{ github.ref_name }}" | sed 's/\//-/g' | tr '[:upper:]' '[:lower:]')
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+          echo "NAMESPACE=preview-$BRANCH" >> $GITHUB_ENV
+          echo "DB_NAME=db_$(echo $BRANCH | sed 's/[^a-zA-Z0-9]/_/g')" >> $GITHUB_ENV
+          echo "IMAGE=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/${{ env.APP_NAME }}:$BRANCH" >> $GITHUB_ENV
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          push: true
-          tags: ghcr.io/qvvan/test-minikube:${{ github.sha }}
+      - name: Pull cache image
+        run: docker pull ${{ env.IMAGE }} || true
 
-      - name: Setup kubectl
+      - name: Build and push image
+        run: |
+          docker build \
+            --cache-from ${{ env.IMAGE }} \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -t ${{ env.IMAGE }} .
+          docker push ${{ env.IMAGE }}
+
+      - name: Configure kubeconfig
         run: |
           mkdir -p ~/.kube
           echo "${{ secrets.KUBECONFIG_DATA }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
           curl -LO "https://dl.k8s.io/release/stable.txt"
           curl -LO "https://dl.k8s.io/release/$(cat stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      - name: Deploy to Kubernetes
+      - name: Create namespace
         run: |
-          # Имя ветки без спецсимволов
-          BRANCH_NAME=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9]/_/g' | tr '[:upper:]' '[:lower:]')
-          DB_NAME="db_${BRANCH_NAME}"
-          IMAGE="ghcr.io/qvvan/test-minikube:${{ github.sha }}"
+          kubectl create namespace ${{ env.NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace ${{ env.NAMESPACE }} \
+            preview=true \
+            branch=${{ env.BRANCH }} \
+            --overwrite
 
-          kubectl apply -f - <<EOF
+      - name: Create secrets in namespace
+        run: |
+          kubectl create secret docker-registry ghcr-secret \
+            --docker-server=${{ env.REGISTRY }} \
+            --docker-username=${{ github.repository_owner }} \
+            --docker-password=${{ secrets.GHCR_TOKEN }} \
+            --namespace=${{ env.NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic postgres-secret \
+            --from-literal=ADMIN_URL="postgresql://admin:supersecret123@postgres-service.infra:5432/maindb" \
+            --from-literal=POSTGRES_USER=admin \
+            --from-literal=POSTGRES_PASSWORD=supersecret123 \
+            --namespace=${{ env.NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy
+        env:
+          APP_NAME: ${{ env.APP_NAME }}
+          NAMESPACE: ${{ env.NAMESPACE }}
+          BRANCH: ${{ env.BRANCH }}
+          IMAGE: ${{ env.IMAGE }}
+          DB_NAME: ${{ env.DB_NAME }}
+        run: |
+          cat <<'EOF' | envsubst | kubectl apply -f -
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: python-service-${BRANCH_NAME}
-            namespace: dev
+            name: $APP_NAME
+            namespace: $NAMESPACE
+            labels:
+              app: $APP_NAME
+              branch: $BRANCH
           spec:
             replicas: 1
             selector:
               matchLabels:
-                app: python-service-${BRANCH_NAME}
+                app: $APP_NAME
             template:
               metadata:
                 labels:
-                  app: python-service-${BRANCH_NAME}
+                  app: $APP_NAME
+                  branch: $BRANCH
               spec:
                 nodeSelector:
                   role: server-backend-1
+                imagePullSecrets:
+                  - name: ghcr-secret
                 initContainers:
                   - name: create-db
                     image: postgres:15
@@ -69,13 +122,13 @@ jobs:
                       - /bin/bash
                       - -c
                       - |
-                        DB_EXISTS=\$(psql \$ADMIN_URL -tAc \
-                          "SELECT 1 FROM pg_database WHERE datname='\$DB_NAME'")
-                        if [ "\$DB_EXISTS" != "1" ]; then
-                          psql \$ADMIN_URL -c "CREATE DATABASE \$DB_NAME;"
-                          echo "БД \$DB_NAME создана!"
+                        DB_EXISTS=$(psql $ADMIN_URL -tAc \
+                          "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'")
+                        if [ "$DB_EXISTS" != "1" ]; then
+                          psql $ADMIN_URL -c "CREATE DATABASE $DB_NAME;"
+                          echo "БД $DB_NAME создана!"
                         else
-                          echo "БД \$DB_NAME уже есть, пропускаем"
+                          echo "БД $DB_NAME уже есть, пропускаем"
                         fi
                     env:
                       - name: ADMIN_URL
@@ -84,17 +137,36 @@ jobs:
                             name: postgres-secret
                             key: ADMIN_URL
                       - name: DB_NAME
-                        value: "${DB_NAME}"
+                        value: $DB_NAME
                 containers:
-                  - name: python-service
-                    image: ${IMAGE}
+                  - name: $APP_NAME
+                    image: $IMAGE
                     ports:
                       - containerPort: 8000
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                      limits:
+                        cpu: 200m
+                        memory: 256Mi
+                    readinessProbe:
+                      httpGet:
+                        path: /health
+                        port: 8000
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    livenessProbe:
+                      httpGet:
+                        path: /health
+                        port: 8000
+                      initialDelaySeconds: 10
+                      periodSeconds: 30
                     env:
                       - name: DB_HOST
-                        value: "postgres-service.infra"
+                        value: postgres-service.infra
                       - name: DB_NAME
-                        value: "${DB_NAME}"
+                        value: $DB_NAME
                       - name: DB_USER
                         valueFrom:
                           secretKeyRef:
@@ -105,43 +177,73 @@ jobs:
                           secretKeyRef:
                             name: postgres-secret
                             key: POSTGRES_PASSWORD
+                      - name: ENVIRONMENT
+                        value: preview
+                      - name: BRANCH
+                        value: $BRANCH
           ---
           apiVersion: v1
           kind: Service
           metadata:
-            name: python-service-${BRANCH_NAME}
-            namespace: dev
+            name: $APP_NAME
+            namespace: $NAMESPACE
           spec:
+            type: NodePort
             selector:
-              app: python-service-${BRANCH_NAME}
+              app: $APP_NAME
             ports:
               - port: 8000
                 targetPort: 8000
-            type: ClusterIP
           EOF
 
-      - name: Deploy Summary
+      - name: Wait for rollout
         run: |
-            BRANCH_NAME=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9]/_/g' | tr '[:upper:]' '[:lower:]')
-            
-            # Ждём пока под запустится
-            kubectl rollout status deployment/python-service-${BRANCH_NAME} -n dev --timeout=120s
-            
-            # Получаем NodePort
-            NODE_PORT=$(kubectl get service python-service-${BRANCH_NAME} -n dev \
-              -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "ClusterIP (нет внешнего порта)")
-            
-            # IP воркер ноды
-            NODE_IP=$(kubectl get nodes -l role=server-backend-1 \
-              -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
-            
-            # Пишем Summary
-            echo "## 🚀 Deploy успешен!" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Параметр | Значение |" >> $GITHUB_STEP_SUMMARY
-            echo "|----------|----------|" >> $GITHUB_STEP_SUMMARY
-            echo "| 🌿 Ветка | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| 📦 Образ | \`ghcr.io/qvvan/test-minikube:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| 🗄️ База данных | \`db_${BRANCH_NAME}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| 🌐 URL | \`http://${NODE_IP}:${NODE_PORT}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| 📝 Namespace | \`dev\` |" >> $GITHUB_STEP_SUMMARY
+          kubectl rollout status deployment/${{ env.APP_NAME }} \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=120s
+
+      - name: Get preview URL
+        id: preview
+        run: |
+          NODE_PORT=$(kubectl get svc ${{ env.APP_NAME }} \
+            -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.spec.ports[0].nodePort}')
+
+          NODE_IP=$(kubectl get nodes -l role=server-backend-1 \
+            -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+
+          PREVIEW_URL="http://${NODE_IP}:${NODE_PORT}"
+          echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+
+          echo "## ✅ Preview deployed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌍 URL | $PREVIEW_URL |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌿 Branch | \`${{ env.BRANCH }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🗄️ Database | \`${{ env.DB_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 Image | \`${{ env.IMAGE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🏷 Namespace | \`${{ env.NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Find associated PR
+        id: find_pr
+        uses: jwalton/gh-find-current-pr@v1
+        with:
+          state: open
+
+      - name: Comment on PR
+        if: steps.find_pr.outputs.number
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ steps.find_pr.outputs.number }}
+          body: |
+            ## 🚀 Preview Environment Updated
+
+            | | |
+            |---|---|
+            | 🌍 URL | ${{ steps.preview.outputs.url }} |
+            | 🗄️ Database | `${{ env.DB_NAME }}` |
+            | 📦 Image | `${{ env.IMAGE }}` |
+            | 🔄 Commit | `${{ github.sha }}` |
+
+            _Обновлено при пуше в `${{ github.ref_name }}`_

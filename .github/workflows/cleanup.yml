@@ -1,0 +1,90 @@
+name: Preview Environment Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+  delete:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name to cleanup"
+        required: true
+  schedule:
+    - cron: "0 3 * * *"
+
+env:
+  APP_NAME: python-service
+
+jobs:
+  cleanup-single:
+    if: github.event_name == 'pull_request' || github.event_name == 'delete' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set branch name
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ github.event.inputs.branch }}"
+          elif [ "${{ github.event_name }}" = "delete" ]; then
+            BRANCH=$(echo "${{ github.event.ref }}" | sed 's/\//-/g' | tr '[:upper:]' '[:lower:]')
+          else
+            BRANCH=$(echo "${{ github.head_ref }}" | sed 's/\//-/g' | tr '[:upper:]' '[:lower:]')
+          fi
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+          echo "NAMESPACE=preview-$BRANCH" >> $GITHUB_ENV
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DATA }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+          curl -LO "https://dl.k8s.io/release/stable.txt"
+          curl -LO "https://dl.k8s.io/release/$(cat stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Delete namespace
+        run: |
+          if kubectl get namespace ${{ env.NAMESPACE }} &>/dev/null; then
+            kubectl delete namespace ${{ env.NAMESPACE }}
+            echo "✅ Namespace ${{ env.NAMESPACE }} удалён"
+          else
+            echo "ℹ️ Namespace ${{ env.NAMESPACE }} не найден"
+          fi
+
+      - name: Summary
+        run: |
+          echo "## 🧹 Preview cleaned up" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌿 Branch | \`${{ env.BRANCH }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🏷 Namespace | \`${{ env.NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  cleanup-stale:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DATA }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+          curl -LO "https://dl.k8s.io/release/stable.txt"
+          curl -LO "https://dl.k8s.io/release/$(cat stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Delete stale namespaces older than 7 days
+        run: |
+          echo "## 🧹 Stale preview cleanup" >> $GITHUB_STEP_SUMMARY
+
+          kubectl get namespaces -l preview=true \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' \
+            | while read NS CREATED; do
+                CREATED_EPOCH=$(date -d "$CREATED" +%s)
+                NOW_EPOCH=$(date +%s)
+                AGE_DAYS=$(( (NOW_EPOCH - CREATED_EPOCH) / 86400 ))
+                if [ "$AGE_DAYS" -gt 7 ]; then
+                  kubectl delete namespace "$NS"
+                  echo "✅ Удалён: $NS (возраст: $AGE_DAYS дней)" | tee -a $GITHUB_STEP_SUMMARY
+                fi
+              done
