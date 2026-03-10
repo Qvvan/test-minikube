@@ -91,25 +91,25 @@ jobs:
           IMAGE: ${{ env.IMAGE }}
           DB_NAME: ${{ env.DB_NAME }}
         run: |
-          cat <<'EOF' | envsubst | kubectl apply -f -
+          cat <<'EOF' | envsubst '${APP_NAME} ${NAMESPACE} ${BRANCH} ${IMAGE} ${DB_NAME}' | kubectl apply -f -
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: $APP_NAME
-            namespace: $NAMESPACE
+            name: ${APP_NAME}
+            namespace: ${NAMESPACE}
             labels:
-              app: $APP_NAME
-              branch: $BRANCH
+              app: ${APP_NAME}
+              branch: ${BRANCH}
           spec:
             replicas: 1
             selector:
               matchLabels:
-                app: $APP_NAME
+                app: ${APP_NAME}
             template:
               metadata:
                 labels:
-                  app: $APP_NAME
-                  branch: $BRANCH
+                  app: ${APP_NAME}
+                  branch: ${BRANCH}
               spec:
                 nodeSelector:
                   role: server-backend-1
@@ -137,10 +137,10 @@ jobs:
                             name: postgres-secret
                             key: ADMIN_URL
                       - name: DB_NAME
-                        value: $DB_NAME
+                        value: ${DB_NAME}
                 containers:
-                  - name: $APP_NAME
-                    image: $IMAGE
+                  - name: ${APP_NAME}
+                    image: ${IMAGE}
                     ports:
                       - containerPort: 8000
                     resources:
@@ -166,7 +166,7 @@ jobs:
                       - name: DB_HOST
                         value: postgres-service.infra
                       - name: DB_NAME
-                        value: $DB_NAME
+                        value: ${DB_NAME}
                       - name: DB_USER
                         valueFrom:
                           secretKeyRef:
@@ -180,17 +180,17 @@ jobs:
                       - name: ENVIRONMENT
                         value: preview
                       - name: BRANCH
-                        value: $BRANCH
+                        value: ${BRANCH}
           ---
           apiVersion: v1
           kind: Service
           metadata:
-            name: $APP_NAME
-            namespace: $NAMESPACE
+            name: ${APP_NAME}
+            namespace: ${NAMESPACE}
           spec:
             type: NodePort
             selector:
-              app: $APP_NAME
+              app: ${APP_NAME}
             ports:
               - port: 8000
                 targetPort: 8000
