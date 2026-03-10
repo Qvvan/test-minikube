@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Deploy
 
 on:
   push:
@@ -28,8 +28,7 @@ jobs:
           push: true
           tags: ghcr.io/qvvan/test-minikube:${{ github.sha }}
 
-      # Новый шаг — деплой в Kubernetes
-      - name: Deploy to Kubernetes
+      - name: Setup kubectl
         run: |
           mkdir -p ~/.kube
           echo "${{ secrets.KUBECONFIG_DATA }}" > ~/.kube/config
@@ -37,5 +36,86 @@ jobs:
           curl -LO "https://dl.k8s.io/release/$(cat stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
-          sed -i "s|IMAGE_TAG|${{ github.sha }}|g" k8s/service.yaml
-          kubectl apply -f k8s/service.yaml
+
+      - name: Deploy to Kubernetes
+        run: |
+          # Имя ветки без спецсимволов
+          BRANCH_NAME=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9]/_/g' | tr '[:upper:]' '[:lower:]')
+          DB_NAME="db_${BRANCH_NAME}"
+          IMAGE="ghcr.io/qvvan/test-minikube:${{ github.sha }}"
+
+          kubectl apply -f - <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: python-service-${BRANCH_NAME}
+            namespace: dev
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: python-service-${BRANCH_NAME}
+            template:
+              metadata:
+                labels:
+                  app: python-service-${BRANCH_NAME}
+              spec:
+                nodeSelector:
+                  role: server-backend-1
+                initContainers:
+                  - name: create-db
+                    image: postgres:15
+                    command:
+                      - /bin/bash
+                      - -c
+                      - |
+                        DB_EXISTS=\$(psql \$ADMIN_URL -tAc \
+                          "SELECT 1 FROM pg_database WHERE datname='\$DB_NAME'")
+                        if [ "\$DB_EXISTS" != "1" ]; then
+                          psql \$ADMIN_URL -c "CREATE DATABASE \$DB_NAME;"
+                          echo "БД \$DB_NAME создана!"
+                        else
+                          echo "БД \$DB_NAME уже есть, пропускаем"
+                        fi
+                    env:
+                      - name: ADMIN_URL
+                        valueFrom:
+                          secretKeyRef:
+                            name: postgres-secret
+                            key: ADMIN_URL
+                      - name: DB_NAME
+                        value: "${DB_NAME}"
+                containers:
+                  - name: python-service
+                    image: ${IMAGE}
+                    ports:
+                      - containerPort: 8000
+                    env:
+                      - name: DB_HOST
+                        value: "postgres-service.infra"
+                      - name: DB_NAME
+                        value: "${DB_NAME}"
+                      - name: DB_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: postgres-secret
+                            key: POSTGRES_USER
+                      - name: DB_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: postgres-secret
+                            key: POSTGRES_PASSWORD
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: python-service-${BRANCH_NAME}
+            namespace: dev
+          spec:
+            selector:
+              app: python-service-${BRANCH_NAME}
+            ports:
+              - port: 8000
+                targetPort: 8000
+            type: ClusterIP
+          EOF

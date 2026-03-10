@@ -14,7 +14,7 @@ spec:
         app: python-service
     spec:
       nodeSelector:
-        role: server-backend-1     # ← на втором worker
+        role: server-backend-1
       containers:
         - name: python-service
           image: ghcr.io/qvvan/test-minikube:IMAGE_TAG
