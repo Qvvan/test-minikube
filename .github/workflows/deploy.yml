@@ -27,7 +27,7 @@ jobs:
           echo "BRANCH=$BRANCH" >> $GITHUB_ENV
           echo "NAMESPACE=preview-$BRANCH" >> $GITHUB_ENV
           echo "DB_NAME=db_$(echo $BRANCH | sed 's/[^a-zA-Z0-9]/_/g')" >> $GITHUB_ENV
-          echo "IMAGE=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/${{ env.APP_NAME }}:$BRANCH" >> $GITHUB_ENV
+          echo "IMAGE=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/${{ env.APP_NAME }}:${{ github.sha }}" >> $GITHUB_ENV
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -36,13 +36,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Pull cache image
-        run: docker pull ${{ env.IMAGE }} || true
-
       - name: Build and push image
         run: |
           docker build \
-            --cache-from ${{ env.IMAGE }} \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             -t ${{ env.IMAGE }} .
