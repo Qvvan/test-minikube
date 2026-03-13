@@ -12,6 +12,10 @@ def get_db():
         password=os.getenv("DB_PASSWORD")
     )
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 @app.get("/")
 def read_root():
     return {"status": "ok!"}

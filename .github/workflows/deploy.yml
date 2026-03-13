@@ -8,6 +8,7 @@ on:
 env:
   REGISTRY: ghcr.io
   APP_NAME: python-service
+  NODE_IP: 46.38.156.11 
 
 jobs:
   deploy:
@@ -27,7 +28,7 @@ jobs:
           echo "BRANCH=$BRANCH" >> $GITHUB_ENV
           echo "NAMESPACE=preview-$BRANCH" >> $GITHUB_ENV
           echo "DB_NAME=db_$(echo $BRANCH | sed 's/[^a-zA-Z0-9]/_/g')" >> $GITHUB_ENV
-          echo "IMAGE=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/${{ env.APP_NAME }}:$BRANCH" >> $GITHUB_ENV
+          echo "IMAGE=${{ env.REGISTRY }}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/${{ env.APP_NAME }}:${{ github.sha }}" >> $GITHUB_ENV
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -36,13 +37,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Pull cache image
-        run: docker pull ${{ env.IMAGE }} || true
-
       - name: Build and push image
         run: |
           docker build \
-            --cache-from ${{ env.IMAGE }} \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             -t ${{ env.IMAGE }} .
@@ -91,25 +88,25 @@ jobs:
           IMAGE: ${{ env.IMAGE }}
           DB_NAME: ${{ env.DB_NAME }}
         run: |
-          cat <<'EOF' | envsubst | kubectl apply -f -
+          cat <<'EOF' | envsubst '${APP_NAME} ${NAMESPACE} ${BRANCH} ${IMAGE} ${DB_NAME}' | kubectl apply -f -
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: $APP_NAME
-            namespace: $NAMESPACE
+            name: ${APP_NAME}
+            namespace: ${NAMESPACE}
             labels:
-              app: $APP_NAME
-              branch: $BRANCH
+              app: ${APP_NAME}
+              branch: ${BRANCH}
           spec:
             replicas: 1
             selector:
               matchLabels:
-                app: $APP_NAME
+                app: ${APP_NAME}
             template:
               metadata:
                 labels:
-                  app: $APP_NAME
-                  branch: $BRANCH
+                  app: ${APP_NAME}
+                  branch: ${BRANCH}
               spec:
                 nodeSelector:
                   role: server-backend-1
@@ -137,10 +134,10 @@ jobs:
                             name: postgres-secret
                             key: ADMIN_URL
                       - name: DB_NAME
-                        value: $DB_NAME
+                        value: ${DB_NAME}
                 containers:
-                  - name: $APP_NAME
-                    image: $IMAGE
+                  - name: ${APP_NAME}
+                    image: ${IMAGE}
                     ports:
                       - containerPort: 8000
                     resources:
@@ -166,7 +163,7 @@ jobs:
                       - name: DB_HOST
                         value: postgres-service.infra
                       - name: DB_NAME
-                        value: $DB_NAME
+                        value: ${DB_NAME}
                       - name: DB_USER
                         valueFrom:
                           secretKeyRef:
@@ -180,17 +177,17 @@ jobs:
                       - name: ENVIRONMENT
                         value: preview
                       - name: BRANCH
-                        value: $BRANCH
+                        value: ${BRANCH}
           ---
           apiVersion: v1
           kind: Service
           metadata:
-            name: $APP_NAME
-            namespace: $NAMESPACE
+            name: ${APP_NAME}
+            namespace: ${NAMESPACE}
           spec:
             type: NodePort
             selector:
-              app: $APP_NAME
+              app: ${APP_NAME}
             ports:
               - port: 8000
                 targetPort: 8000
@@ -208,11 +205,7 @@ jobs:
           NODE_PORT=$(kubectl get svc ${{ env.APP_NAME }} \
             -n ${{ env.NAMESPACE }} \
             -o jsonpath='{.spec.ports[0].nodePort}')
-
-          NODE_IP=$(kubectl get nodes -l role=server-backend-1 \
-            -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
-
-          PREVIEW_URL="http://${NODE_IP}:${NODE_PORT}"
+          PREVIEW_URL="http://${{ env.NODE_IP }}:$NODE_PORT"
           echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
 
           echo "## ✅ Preview deployed!" >> $GITHUB_STEP_SUMMARY
